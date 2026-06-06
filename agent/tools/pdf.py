@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 
 from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 logger = logging.getLogger("omni-agent-ai.tools.pdf")
 
@@ -47,7 +47,7 @@ async def _ocr_fallback(file_path: Path) -> str:
     Used when the PDF is scanned / image-only.
     """
     try:
-        import fitz                          # PyMuPDF
+        from PyMuPDF import fitz 
         from agent.tools.ocr import ocr_image_bytes
 
         doc   = fitz.open(str(file_path))

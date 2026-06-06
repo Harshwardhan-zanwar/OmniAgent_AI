@@ -9,8 +9,9 @@ Code explanation, bug detection, and complexity analysis.
 import logging
 import re
 
-import google.generativeai as genai
-from langchain.prompts import PromptTemplate
+from google import genai as google_genai
+from agent.config import GEMINI_MODEL
+from langchain_core.prompts import PromptTemplate
 
 logger = logging.getLogger("omni-agent-ai.tools.code_explain")
 
@@ -71,17 +72,13 @@ async def explain_code(text: str) -> str:
         language = detected
 
     logger.info(f"Detected language:{language}")
-
+    import os
     prompt=CODE_EXPLAIN_PROMPT.format(language=language,code=code[:4000])
-    model=genai.GenerativeModel("gemini-2.5-flash")
-
-    response=model.generate_content(
-        prompt,
-        generation_config=genai.GenerationConfig(
-            temperature=0.2,
-            max_output_tokens=1000,
-        ),
-    )
+    client = google_genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    response = client.models.generate_content(
+    model=GEMINI_MODEL,
+    contents=prompt
+)
     result=response.text.strip()
     logger.info(f"code explanation generated:{len(result)}chars")
 

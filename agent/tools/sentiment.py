@@ -8,9 +8,11 @@
 import json
 import logging
 import re
+import os
 
-import google.generativeai as genai
-from langchain.prompts import PromptTemplate
+from google import genai as google_genai
+from agent.config import GEMINI_MODEL
+from langchain_core.prompts import PromptTemplate
 
 logger = logging.getLogger("omni-agent-ai.tools.sentiment")
 
@@ -20,7 +22,7 @@ SENTIMENT_PROMPT = PromptTemplate(
 Analyze the sentiment of the text below and respond ONLY with valid JSON, no markdown fences:
 {{
   "label":         "Positive" | "Negative" | "Neutral" | "Mixed",
-  "confidence":    float between 0.0 and 1.0,
+  "confidence":     float between 0.0 and 1.0,
   "justification": "one sentence explaining why",
   "emotions":      ["emotion1", "emotion2", "emotion3"],
   "tone":          "formal | informal | aggressive | empathetic | neutral"
@@ -33,22 +35,22 @@ async def analyze_sentiment(text: str) -> str:
     Perform sentiment analysis on the given text.
     Returns a formatted, human-readable sentiment report.
     """
+    
+    logger.info(f"Analyzing sentiment: {len(text)} chars")
+
     if not text or len(text.strip()) < 10:
         return "[Not enough content for sentiment analysis.]"
-
-    logger.info(f"Analyzing sentiment: {len(text)} chars")
+    
+    
 
     sample  = text[:4000]
     prompt  = SENTIMENT_PROMPT.format(text=sample)
-    model   = genai.GenerativeModel("gemini-2.5-flash")
+    client = google_genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     try:
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(
-                temperature=0.1,
-                max_output_tokens=300,
-            ),
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt,
         )
         raw = response.text.strip()
 
@@ -91,9 +93,10 @@ def _format_sentiment_report(data: dict) -> str:
 
 async def _plain_sentiment_fallback(text: str) -> str:
     """Simple fallback when JSON parsing fails."""
-    model = genai.GenerativeModel("gemini-2.5-flash")
-    response = model.generate_content(
-        f"Analyze the sentiment of this text. Give: label (Positive/Negative/Neutral/Mixed), "
-        f"confidence percentage, and one-line justification.\nText:{text[:2000]}"
+    client = google_genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    response = client.models.generate_content(
+        model="gemini-2.5-flash-lite",
+        contents=f"Analyze the sentiment of this text. Give: label (Positive/Negative/Neutral/Mixed), "
+                 f"confidence percentage, and one-line justification.\nText:{text[:2000]}",
     )
     return response.text.strip()

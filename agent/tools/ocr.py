@@ -8,7 +8,9 @@ import os
 import logging
 from pathlib import Path
 
-logger = logging.getLogger("omni-agent-ai.tools.ocr")
+from agent.config import GEMINI_MODEL
+
+logger=logging.getLogger("omni-agent-ai.tools.ocr")
 
 
 async def extract_image_text(file_path: Path) -> str:
@@ -17,7 +19,7 @@ async def extract_image_text(file_path: Path) -> str:
     Returns extracted text string.
     """
     logger.info(f"Running OCR on image: {file_path.name}")
-    image_bytes = file_path.read_bytes()
+    image_bytes=file_path.read_bytes()
     return await ocr_image_bytes(image_bytes)
 
 
@@ -30,16 +32,17 @@ async def ocr_image_bytes(image_bytes: bytes) -> str:
     try:
         from google.cloud import vision
 
-        client = vision.ImageAnnotatorClient()
-        image  = vision.Image(content=image_bytes)
+        api_key=os.getenv("GOOGLE_API_KEY")
+        client=vision.ImageAnnotatorClient(client_options={"api_key": api_key})
+        image=vision.Image(content=image_bytes)
 
-        response = client.document_text_detection(image=image)
+        response=client.document_text_detection(image=image)
 
         if response.error.message:
             raise RuntimeError(f"Vision API error: {response.error.message}")
 
-        text = response.full_text_annotation.text
-        if text and len(text.strip()) > 10:
+        text=response.full_text_annotation.text
+        if text and len(text.strip())>10:
             logger.info(f"Cloud Vision OCR: {len(text)} chars extracted")
             return text.strip()
 
@@ -58,20 +61,23 @@ async def _gemini_vision_fallback(image_bytes: bytes) -> str:
     Activated when Cloud Vision is unavailable or returns empty.
     """
     try:
-        import google.generativeai as genai
+        from google import genai as google_genai
         import PIL.Image
         import io
 
-        image   = PIL.Image.open(io.BytesIO(image_bytes))
-        model   = genai.GenerativeModel("gemini-1.5-flash")
+        image=PIL.Image.open(io.BytesIO(image_bytes))
+        client=google_genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-        response = model.generate_content([
-            "Extract ALL text visible in this image. "
-            "Return only the extracted text, nothing else. "
-            "Preserve formatting and line breaks where possible.",
-            image,
-        ])
-        text = response.text.strip()
+        response=client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                "Extract ALL text visible in this image. "
+                "Return only the extracted text, nothing else. "
+                "Preserve formatting and line breaks where possible.",
+                image,
+            ]
+        )
+        text=response.text.strip()
         logger.info(f"Gemini Vision fallback: {len(text)} chars extracted")
         return text
 

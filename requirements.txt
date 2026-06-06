@@ -2,6 +2,10 @@ langchain==0.3.7
 langchain-community==0.3.7
 unstructured==0.16.10
 
+langchain-core 
+langchain-google-genai
+langchain-text-splitters
+
 #Web Framework 
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
@@ -16,10 +20,12 @@ pydantic==2.9.2
 python-multipart==0.0.12
 
 #Google Gemini AI
-google-generativeai==0.8.3
+google-genai>=1.0.0
 
 #Google Cloud Vision(OCR fallback) 
 google-cloud-vision==3.7.4
+
+google-cloud-speech
 
 #PDF Parsing 
 pypdf==5.1.0 #fast pdf read
@@ -29,7 +35,7 @@ pdfplumber==0.11.4 #pdf table extraction
 Pillow==11.0.0
 
 #YouTube Transcript
-youtube-transcript-api==0.6.2
+youtube-transcript-api>=1.1.0
 
 #Audio Processing 
 pydub==0.25.1
@@ -51,3 +57,7 @@ redis==5.2.0
 
 #PyPDF dependency for OCR fallback on PDFs
 PyMuPDF==1.24.5
+
+requests==2.32.3
+urllib3==2.2.3
+charset-normalizer==3.4.0

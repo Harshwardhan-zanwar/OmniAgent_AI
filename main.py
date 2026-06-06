@@ -19,14 +19,12 @@ from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
 
-import google.generativeai as genai
+from google import genai as google_genai
 
 #Load environment variables from .env
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-genai.configure(api_key=GEMINI_API_KEY)
 
 #Directory where uploaded files are temporarily stored
 UPLOAD_DIR = Path("uploads")
