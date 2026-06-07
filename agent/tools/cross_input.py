@@ -1,110 +1,67 @@
-'''
-Cross-input reasoning — compare and synthesize
-content from multiple uploaded files.
-
-Handles:
-  - "Do these two documents discuss the same topic?"
-  - "Audio + PDF comparison"
-  - "What's different between these files?"
-  - Any unified query across multiple inputs
-'''
-
+"""Cross-input reasoning and file comparison."""
 import logging
 import re
-import os
+from agent.config import get_client
 
-from google import genai as google_genai
-from agent.config import GEMINI_MODEL
-from langchain_core.prompts import PromptTemplate
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+logger=logging.getLogger("omni-agent-ai.tools.cross_input")
 
-logger = logging.getLogger("omni-agent-ai.tools.cross_input")
+prompt_template="""Compare and synthesize the provided source contents to answer the user query.
 
-COMPARE_PROMPT = PromptTemplate(
-    input_variables=["query", "sources"],
-    template='''You are an expert analyst. The user has provided multiple sources of content.
-User's question: {query}
-Sources:{sources}
-Provide a thorough comparative analysis that:
-1. **Common Themes** — What topics/ideas appear across multiple sources?
-2. **Key Differences** — What is unique to each source?
-3. **Direct Answer** — Directly answer the user's question using evidence from the sources
-4. **Conclusion** — One-paragraph synthesis
-Be specific. Reference the source names (e.g., "In [File: audio.mp3]...") when citing evidence.'''
-)
-CHUNK_SIZE=3000 
+User query: {query}
 
-async def compare_inputs(query: str, combined_text: str) -> str:
-    '''
-    Perform cross-input reasoning across multiple files.
-    Splits combined_text back into per-source sections and compares them.
-    '''
-    if not combined_text or len(combined_text.strip())<50:
-        return "[Not enough content across inputs for comparison.]"
+Sources:
+{sources}
 
-    logger.info(f"Cross-input comparison.Query='{query[:60]}',text={len(combined_text)} chars")
+In your analysis:
+- Identify common themes across sources.
+- Detail key differences between them.
+- Directly answer the user's query with evidence.
+- Conclude with a brief synthesis.
+Cite source names (e.g. "[File: filename.txt]") when citing evidence."""
 
-    sources=_split_into_sources(combined_text)
+chunk_size=3000
+
+async def compare(query:str,combined:str) -> str:
+    if not combined or len(combined.strip())<50:
+        return "[Not enough content for comparison.]"
+
+    logger.info(f"Cross-input comparison: query='{query[:60]}', size={len(combined)}")
+    sources=_parse_sources(combined)
 
     if len(sources)<2:
-        logger.info("Only one source found — falling back to QA")
-        return await _single_source_qa(query, combined_text)
+        return await _single_qa(query,combined)
 
-    formatted_sources=""
+    src_text=""
     for name,content in sources.items():
-        trimmed=content[:CHUNK_SIZE]
-        formatted_sources+=f"\n---\n**{name}**\n{trimmed}\n"
+        chunk=content[:chunk_size]
+        src_text+=f"\n---\n**{name}**\n{chunk}\n"
 
-    prompt=COMPARE_PROMPT.format(query=query or "Compare these sources.",sources=formatted_sources)
-    
-    client=google_genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-    response=client.models.generate_content(
+    prompt=prompt_template.format(query=query or "Compare these sources.",sources=src_text)
+    client=get_client()
+    resp=client.models.generate_content(
         model="gemini-2.5-flash-lite",
         contents=prompt
     )
-    
-    result=response.text.strip()
-    logger.info(f"Cross-input analysis generated: {len(result)} chars")
-    return result
+    return resp.text.strip()
 
-
-def _split_into_sources(combined_text: str) -> dict[str, str]:
-    '''
-    Parse the combined_text string (built by planner.py) back into
-    a dict of {filename: content}.
-
-    planner.py formats it as:
-        [File: filename.ext]
-        <content>
-
-        [File: filename2.ext]
-        <content>
-    '''
+def _parse_sources(txt:str) -> dict[str,str]:
     sources={}
-    pattern=re.compile(r"\[File: ([^\]]+)\]\n(.*?)(?=\[File: |\Z)", re.DOTALL)
-    matches=pattern.findall(combined_text)
+    pat=re.compile(r"\[File: ([^\]]+)\]\n(.*?)(?=\[File: |\Z)",re.DOTALL)
+    for name,content in pat.findall(txt):
+        sources[f"File: {name.strip()}"]=content.strip()
 
-    for name,content in matches:
-        sources[f"File: {name.strip()}"] = content.strip()
+    yt_pat=re.compile(r"\[YouTube Transcript: ([^\]]+)\]\n(.*?)(?=\[|\Z)",re.DOTALL)
+    for url,content in yt_pat.findall(txt):
+        sources[f"YouTube: {url.strip()}"]=content.strip()
 
-    #capture yt transcripts
-    yt_pattern=re.compile(r"\[YouTube Transcript: ([^\]]+)\]\n(.*?)(?=\[|\Z)", re.DOTALL)
-    yt_matches=yt_pattern.findall(combined_text)
-    for url,content in yt_matches:
-        sources[f"YouTube: {url.strip()}"] = content.strip()
-
-    # If no structure, treating as one blob
     if not sources:
-        sources["Combined Input"]=combined_text
-
+        sources["Combined Input"]=txt
     return sources
 
-
-async def _single_source_qa(query:str, text:str) -> str:
-    '''Fallback when only one source is present.'''
-    client=google_genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-    response=client.models.generate_content(
+async def _single_qa(query:str,txt:str) -> str:
+    client=get_client()
+    resp=client.models.generate_content(
         model="gemini-2.5-flash-lite",
-        contents=f"Answer this question based on the content below:\n\nQuestion:{query}\nContent:{text[:5000]}"
+        contents=f"Answer the question based on the content:\n\nQuestion: {query}\nContent: {txt[:5000]}"
     )
-    return response.text.strip()
+    return resp.text.strip()

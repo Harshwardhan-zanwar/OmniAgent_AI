@@ -1,9 +1,4 @@
-"""
-omni-agent-ai — main.py
-FastAPI entry point: routes, middleware, request/response models, endpoints.
-"""
-
-# Imports
+"""omni-agent-ai main entrypoint."""
 import os
 import uuid
 import shutil
@@ -13,223 +8,175 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
 
-from google import genai as google_genai
-
-#Load environment variables from .env
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+gemini_key=os.getenv("GEMINI_API_KEY")
+upload_dir=Path("uploads")
+upload_dir.mkdir(exist_ok=True)
 
-#Directory where uploaded files are temporarily stored
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
-
-#Logger
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("omni-agent-ai")
+logger=logging.getLogger("omni-agent-ai")
 
-
-#App Initialization
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("omni-agent-ai starting up...")
+async def lifespan(app:FastAPI):
+    logger.info("omni-agent-ai starting...")
     yield
-    # Clean up upload folder on shutdown
-    shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
-    UPLOAD_DIR.mkdir(exist_ok=True)
-    logger.info("omni-agent-ai shut down cleanly.")
+    shutil.rmtree(upload_dir,ignore_errors=True)
+    upload_dir.mkdir(exist_ok=True)
+    logger.info("omni-agent-ai shut down.")
 
-app = FastAPI(
+app=FastAPI(
     title="omni-agent-ai",
-    description="Agentic app that accepts text, image, PDF, and audio inputs and autonomously performs tasks.",
+    description="Multi-modal agentic app.",
     version="1.0.0",
     lifespan=lifespan,
 )
 
-#Allow frontend(served separately during dev, or same origin in prod) to call the API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      #tighten in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-#Serve the frontend folder as static files
-frontend_path = Path("frontend")
+frontend_path=Path("frontend")
 if frontend_path.exists():
-    app.mount("/static", StaticFiles(directory="frontend"), name="static")
+    app.mount("/static",StaticFiles(directory="frontend"),name="static")
 
-
-#Pydantic Models
 class HealthResponse(BaseModel):
-    status: str
-    version: str
+    status:str
+    version:str
 
 class EstimateRequest(BaseModel):
-    query: str
-    file_names: Optional[list[str]] = []
+    query:str
+    file_names:Optional[list[str]]=[]
 
 class EstimateResponse(BaseModel):
-    input_tokens: int
-    estimated_cost_usd: float
-    model: str
-    note: str
+    input_tokens:int
+    estimated_cost_usd:float
+    model:str
+    note:str
 
 class AgentStep(BaseModel):
-    step: int
-    tool: str
-    description: str
-    status: str          #"success" | "failed" | "skipped"
-    output_preview: Optional[str] = None
+    step:int
+    tool:str
+    description:str
+    status:str
+    output_preview:Optional[str]=None
 
 class ChatResponse(BaseModel):
-    session_id: str
-    query: str
-    extracted_text: Optional[str] = None
-    plan_trace: list[AgentStep]
-    result: str
-    follow_up_question: Optional[str] = None
-    total_tokens_used: Optional[int] = None
+    session_id:str
+    query:str
+    extracted_text:Optional[str]=None
+    plan_trace:list[AgentStep]
+    result:str
+    follow_up_question:Optional[str]=None
+    total_tokens_used:Optional[int]=None
 
-
-#POST /chat  — Main Agent Endpoint
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat",response_model=ChatResponse)
 async def chat(
-    query: str = Form(default=""),
-    files: list[UploadFile] = File(default=[]),
+    query:str=Form(default=""),
+    files:list[UploadFile]=File(default=[]),
 ):
-    """
-    Accepts a text query and/or uploaded files (image, PDF, audio).
-    Passes everything to the agent planner and returns:
-      - extracted text from files
-      - plan trace (which tools ran, in order)
-      - final result
-      - follow-up question if intent was unclear
-    """
-    #Lazy import to keep startup fast
+    """Handle chat query and files via agent planner."""
     from agent.planner import run_agent
 
-    session_id = str(uuid.uuid4())[:8]
-    logger.info(f"[{session_id}] New request — query='{query[:60]}', files={[f.filename for f in files]}")
+    sid=str(uuid.uuid4())[:8]
+    logger.info(f"[{sid}] Request: query='{query[:60]}', files={[f.filename for f in files]}")
 
-    #Save uploaded files to disk 
-    saved_paths: list[Path] = []
-    for upload in files:
-        if not upload.filename:
+    paths=[]
+    for up in files:
+        if not up.filename:
             continue
-        safe_name = f"{session_id}_{upload.filename}"
-        dest = UPLOAD_DIR / safe_name
+        name=f"{sid}_{up.filename}"
+        dest=upload_dir/name
         with dest.open("wb") as out:
-            shutil.copyfileobj(upload.file, out)
-        saved_paths.append(dest)
-        logger.info(f"[{session_id}] Saved upload → {dest}")
+            shutil.copyfileobj(up.file,out)
+        paths.append(dest)
+        logger.info(f"[{sid}] Saved: {dest}")
 
-    #Run Agent
     try:
-        result = await run_agent(
-            session_id=session_id,
+        res=await run_agent(
+            session_id=sid,
             query=query,
-            file_paths=saved_paths,
+            file_paths=paths,
         )
-    except Exception as exc:
-        logger.error(f"[{session_id}] Agent error: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Agent error: {str(exc)}")
+    except Exception as e:
+        logger.error(f"[{sid}] Agent error: {e}",exc_info=True)
+        raise HTTPException(status_code=500,detail=f"Agent error: {str(e)}")
     finally:
-        #Clean up uploaded files after processing
-        for path in saved_paths:
-            path.unlink(missing_ok=True)
+        for p in paths:
+            p.unlink(missing_ok=True)
 
     return ChatResponse(
-        session_id=session_id,
+        session_id=sid,
         query=query,
-        extracted_text=result.get("extracted_text"),
-        plan_trace=[AgentStep(**s) for s in result.get("plan_trace", [])],
-        result=result.get("result", ""),
-        follow_up_question=result.get("follow_up_question"),
-        total_tokens_used=result.get("total_tokens_used"),
+        extracted_text=res.get("extracted_text"),
+        plan_trace=[AgentStep(**s) for s in res.get("plan_trace",[])],
+        result=res.get("result",""),
+        follow_up_question=res.get("follow_up_question"),
+        total_tokens_used=res.get("total_tokens_used"),
     )
 
-
-#GET /health — Uptime Check for Render
-@app.get("/health", response_model=HealthResponse)
+@app.get("/health",response_model=HealthResponse)
 async def health():
-    """
-    Render (and any monitoring tool) pings this endpoint to verify the app is alive.
-    Must return 200 OK quickly.
-    """
-    return HealthResponse(status="ok", version="1.0.0")
+    """Uptime health check."""
+    return HealthResponse(status="ok",version="1.0.0")
 
-
-#POST /estimate — Cost Estimator(Bonus)
-
-#Gemini 1.5 Flash pricing
-COST_PER_1M_INPUT_TOKENS  = 0.075   # USD
-COST_PER_1M_OUTPUT_TOKENS = 0.30    # USD
-AVG_FILE_TOKENS = {
-    "pdf":   3000,   #rough average per page × ~3 pages
-    "image": 500,
-    "audio": 2000,   #per minute of audio
-    "other": 200,
+cost_in=0.075
+cost_out=0.30
+avg_file_tokens={
+    "pdf":3000,
+    "image":500,
+    "audio":2000,
+    "other":200,
 }
 
-@app.post("/estimate", response_model=EstimateResponse)
-async def estimate(request: EstimateRequest):
-    """
-    Before running the agent, estimate how many tokens the request will consume
-    and what it will cost. Shown in the UI so the user knows before clicking Send.
-    """
-    #Count query tokens (approx:1 token ≈ 4 chars)
-    token_count = max(1, len(request.query) // 4)
+@app.post("/estimate",response_model=EstimateResponse)
+async def estimate(request:EstimateRequest):
+    """Estimate token count and cost."""
+    tokens=max(1,len(request.query)//4)
 
-    #Add file token estimates
-    for fname in (request.file_names or []):
-        ext = Path(fname).suffix.lower().lstrip(".")
-        if ext in ("jpg", "jpeg", "png", "webp", "gif"):
-            token_count += AVG_FILE_TOKENS["image"]
-        elif ext == "pdf":
-            token_count += AVG_FILE_TOKENS["pdf"]
-        elif ext in ("mp3", "wav", "m4a", "ogg"):
-            token_count += AVG_FILE_TOKENS["audio"]
+    for name in (request.file_names or []):
+        ext=Path(name).suffix.lower().lstrip(".")
+        if ext in ("jpg","jpeg","png","webp","gif"):
+            tokens+=avg_file_tokens["image"]
+        elif ext=="pdf":
+            tokens+=avg_file_tokens["pdf"]
+        elif ext in ("mp3","wav","m4a","ogg"):
+            tokens+=avg_file_tokens["audio"]
         else:
-            token_count += AVG_FILE_TOKENS["other"]
+            tokens+=avg_file_tokens["other"]
 
-    #Add overhead for system prompt + tool descriptions (~800 tokens)
-    token_count += 800
-
-    cost = (token_count / 1_000_000) * COST_PER_1M_INPUT_TOKENS
+    tokens+=800
+    cost=(tokens/1000000)*cost_in
 
     return EstimateResponse(
-        input_tokens=token_count,
-        estimated_cost_usd=round(cost, 6),
+        input_tokens=tokens,
+        estimated_cost_usd=round(cost,6),
         model="gemini-2.5-flash",
-        note="Estimate only. Actual cost may vary based on output length and tool calls.",
+        note="Estimate only.",
     )
 
-
-#Serve Frontend
-@app.get("/", response_class=HTMLResponse)
+@app.get("/",response_class=HTMLResponse)
 async def serve_frontend():
-    """
-    Serve the chat UI. In production (Render), this is the only page users visit.
-    """
-    index = Path("frontend/index.html")
+    """Serve UI."""
+    index=Path("frontend/index.html")
     return HTMLResponse(content=index.read_text(encoding="utf-8"))
 
-
-#ENTRYPOINT (local dev only)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=True,       # auto-reload
+        reload=True,
         log_level="info",
     )

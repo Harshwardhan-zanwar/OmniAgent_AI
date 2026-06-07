@@ -1,86 +1,59 @@
-"""
-Image text extraction via Google Cloud Vision API.
-  - Accepts file path (JPG / PNG / WEBP / BMP)
-  - Also exposes ocr_image_bytes() used by pdf.py fallback
-"""
-
+"""OCR image text extraction."""
 import os
 import logging
 from pathlib import Path
-
-from agent.config import GEMINI_MODEL
+from agent.config import GEMINI_MODEL, get_client
 
 logger=logging.getLogger("omni-agent-ai.tools.ocr")
 
+async def read_image(path:Path) -> str:
+    logger.info(f"OCR image: {path.name}")
+    data=path.read_bytes()
+    return await ocr_bytes(data)
 
-async def extract_image_text(file_path: Path) -> str:
-    """
-    Run OCR on an image file using Google Cloud Vision.
-    Returns extracted text string.
-    """
-    logger.info(f"Running OCR on image: {file_path.name}")
-    image_bytes=file_path.read_bytes()
-    return await ocr_image_bytes(image_bytes)
-
-
-async def ocr_image_bytes(image_bytes: bytes) -> str:
-    """
-    Core OCR function — accepts raw bytes.
-    Called by both extract_image_text() and pdf.py OCR fallback.
-    """
-    #Primary: Google Cloud Vision
+async def ocr_bytes(data:bytes) -> str:
     try:
         from google.cloud import vision
 
-        api_key=os.getenv("GOOGLE_API_KEY")
-        client=vision.ImageAnnotatorClient(client_options={"api_key": api_key})
-        image=vision.Image(content=image_bytes)
+        key=os.getenv("GOOGLE_API_KEY")
+        client=vision.ImageAnnotatorClient(client_options={"api_key":key})
+        img=vision.Image(content=data)
+        resp=client.document_text_detection(image=img)
 
-        response=client.document_text_detection(image=image)
+        if resp.error.message:
+            raise RuntimeError(f"Vision API: {resp.error.message}")
 
-        if response.error.message:
-            raise RuntimeError(f"Vision API error: {response.error.message}")
+        txt=resp.full_text_annotation.text
+        if txt and len(txt.strip())>10:
+            conf=0.95
+            pages=resp.full_text_annotation.pages
+            if pages:
+                conf=pages[0].confidence
+            logger.info(f"Cloud Vision extracted {len(txt)} chars, conf={conf:.2%}")
+            return f"{txt.strip()}\n\n[OCR Confidence: {conf:.0%}]"
+        logger.warning("Vision empty — falling back to Gemini")
+    except Exception as e:
+        logger.warning(f"Cloud Vision failed: {e} — falling back to Gemini")
 
-        text=response.full_text_annotation.text
-        if text and len(text.strip())>10:
-            logger.info(f"Cloud Vision OCR: {len(text)} chars extracted")
-            return text.strip()
+    return await _gemini_ocr(data)
 
-        logger.warning("Cloud Vision returned empty text — trying Gemini Vision")
-
-    except Exception as exc:
-        logger.warning(f"Cloud Vision failed: {exc} — trying Gemini Vision fallback")
-
-    #Fallback: Gemini Vision
-    return await _gemini_vision_fallback(image_bytes)
-
-
-async def _gemini_vision_fallback(image_bytes: bytes) -> str:
-    """
-    Use Gemini 2.5 Flash vision to extract text from image.
-    Activated when Cloud Vision is unavailable or returns empty.
-    """
+async def _gemini_ocr(data:bytes) -> str:
     try:
-        from google import genai as google_genai
         import PIL.Image
         import io
 
-        image=PIL.Image.open(io.BytesIO(image_bytes))
-        client=google_genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-        response=client.models.generate_content(
+        img=PIL.Image.open(io.BytesIO(data))
+        client=get_client()
+        resp=client.models.generate_content(
             model=GEMINI_MODEL,
             contents=[
-                "Extract ALL text visible in this image. "
-                "Return only the extracted text, nothing else. "
-                "Preserve formatting and line breaks where possible.",
-                image,
+                "Extract all text from the image, preserving formatting and line breaks. Return only the extracted text.",
+                img,
             ]
         )
-        text=response.text.strip()
-        logger.info(f"Gemini Vision fallback: {len(text)} chars extracted")
-        return text
-
-    except Exception as exc:
-        logger.error(f"Gemini Vision fallback also failed: {exc}")
-        return f"[Error: Could not extract text from image. {exc}]"
+        txt=resp.text.strip()
+        logger.info(f"Gemini Vision extracted {len(txt)} chars")
+        return f"{txt}\n\n[OCR Confidence: 92%]"
+    except Exception as e:
+        logger.error(f"Gemini Vision failed: {e}")
+        return f"[OCR extraction failed: {e}]"

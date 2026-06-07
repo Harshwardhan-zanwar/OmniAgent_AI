@@ -1,79 +1,50 @@
-"""
-PDF text extraction.
-  - Primary   : LangChain PyPDFLoader (fast, text-based PDFs)
-  - Fallback  : Google Cloud Vision OCR (scanned / image-only PDFs)
-"""
-
+"""PDF text extraction tool."""
 import logging
 from pathlib import Path
-
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-logger = logging.getLogger("omni-agent-ai.tools.pdf")
+logger=logging.getLogger("omni-agent-ai.tools.pdf")
+max_len=12000
 
-# Max characters, to keep token cost reasonable
-MAX_CHARS = 12_000
-
-
-async def extract_pdf_text(file_path: Path) -> str:
-    """
-    Extract text from a PDF file.
-    Returns cleaned, joined text string.
-    """
-    logger.info(f"Extracting PDF: {file_path.name}")
-
+async def read_pdf(path:Path) -> str:
+    logger.info(f"Extracting PDF: {path.name}")
     try:
-        loader = PyPDFLoader(str(file_path))
-        pages  = loader.load()                      
-        raw    = "\n\n".join(p.page_content for p in pages if p.page_content.strip())
+        loader=PyPDFLoader(str(path))
+        pgs=loader.load()
+        text="\n\n".join(p.page_content for p in pgs if p.page_content.strip())
+        if len(text.strip())>100:
+            logger.info(f"PyPDFLoader extracted {len(text)} chars")
+            return _clean(text)
+        logger.warning("Sparse text — trying OCR")
+    except Exception as e:
+        logger.warning(f"PyPDFLoader failed: {e} — trying OCR")
 
-        if len(raw.strip()) > 100:
-            logger.info(f"PyPDFLoader extracted {len(raw)} chars from {len(pages)} pages")
-            return _clean_and_trim(raw)
+    return await _pdf_ocr(path)
 
-        logger.warning("PyPDFLoader returned sparse text — trying OCR fallback")
-
-    except Exception as exc:
-        logger.warning(f"PyPDFLoader failed: {exc} — trying OCR fallback")
-
-    # ── Fallback: Vision OCR ──────────────────────────────────────────────
-    return await _ocr_fallback(file_path)
-
-#ocr -> optical char recognisation
-async def _ocr_fallback(file_path: Path) -> str:
-    """
-    Convert each PDF page to an image and run Google Cloud Vision OCR.
-    Used when the PDF is scanned / image-only.
-    """
+async def _pdf_ocr(path:Path) -> str:
     try:
-        from PyMuPDF import fitz 
-        from agent.tools.ocr import ocr_image_bytes
+        from PyMuPDF import fitz
+        from agent.tools.ocr import ocr_bytes
 
-        doc   = fitz.open(str(file_path))
-        parts = []
-
-        for page_num, page in enumerate(doc, start=1):
-            pix        = page.get_pixmap(dpi=200)
-            img_bytes  = pix.tobytes("png")
-            page_text  = await ocr_image_bytes(img_bytes)
-            parts.append(f"[Page {page_num}]\n{page_text}")
-            logger.info(f"OCR page {page_num}: {len(page_text)} chars")
-
-        doc.close()
-        return _clean_and_trim("\n\n".join(parts))
-
+        pdf=fitz.open(str(path))
+        pages_text=[]
+        for i,pg in enumerate(pdf,start=1):
+            pixmap=pg.get_pixmap(dpi=200)
+            image_data=pixmap.tobytes("png")
+            text=await ocr_bytes(image_data)
+            pages_text.append(f"[Page {i}]\n{text}")
+            logger.info(f"OCR page {i}: {len(text)} chars")
+        pdf.close()
+        return _clean("\n\n".join(pages_text))
     except ImportError:
-        logger.error("PyMuPDF not installed — cannot do OCR fallback on PDF")
-        return "[Error: Could not extract text from this PDF. Install PyMuPDF for scanned PDF support.]"
-    except Exception as exc:
-        logger.error(f"OCR fallback failed: {exc}")
-        return f"[Error extracting PDF: {exc}]"
+        logger.error("PyMuPDF not installed — OCR fallback unavailable")
+        return "[Error: PyMuPDF not installed for scanned PDF fallback]"
+    except Exception as e:
+        logger.error(f"OCR fallback failed: {e}")
+        return f"[Error extracting PDF: {e}]"
 
-
-def _clean_and_trim(text: str) -> str:
-    """Remove excessive whitespace and trim to MAX_CHARS."""
+def _clean(txt:str) -> str:
     import re
-    text = re.sub(r"\n{3,}", "\n\n", text)   # collapse blank lines
-    text = re.sub(r" {2,}", " ", text)        # collapse spaces
-    return text[:MAX_CHARS].strip()
+    txt=re.sub(r"\n{3,}","\n\n",txt)
+    txt=re.sub(r" {2,}"," ",txt)
+    return txt[:max_len].strip()

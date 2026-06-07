@@ -1,216 +1,124 @@
-"""
-agent/tools/summarize.py
-──────────────────────────────────────────────
-Text summarization — two modes:
-  summarize_text()              : generic docs, PDFs, audio transcripts
-  summarize_youtube_transcript(): YouTube-specific with transcript display
-                                  + map-reduce for long videos
-──────────────────────────────────────────────
-"""
-
-import os
+"""Text and YouTube summarization tools."""
 import logging
-from google import genai as google_genai
-from langchain_core.prompts import PromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from agent.config import get_client
 
-logger = logging.getLogger("omni-agent-ai.tools.summarize")
+logger=logging.getLogger("omni-agent-ai.tools.summarize")
 
-GEMINI_MODEL  = "gemini-2.5-flash-lite"
-CHUNK_SIZE    = 6000
-CHUNK_OVERLAP = 200
+gemini_model="gemini-2.5-flash-lite"
+chunk_size=6000
+overlap=200
+yt_threshold=4000
 
-# Threshold — transcripts longer than this use map-reduce
-YT_LONG_THRESHOLD = 4000
+summary_prompt="""Summarize this content in the following style:
+- ONE-LINE SUMMARY: A single sentence overview.
+- 3 KEY POINTS: Bulleted list of 3 main highlights.
+- 5-SENTENCE SUMMARY: A cohesive 5-sentence paragraph.
 
-SUMMARY_PROMPT = PromptTemplate(
-    input_variables=["text"],
-    template="""You are an expert summarizer. Summarize the content below in exactly this format:
+Please do not include extra headers or sections.
 
-ONE-LINE SUMMARY: A single sentence capturing the core topic.
+Content:
+{text}"""
 
-3 KEY POINTS:
-• <Point 1>
-• <Point 2>
-• <Point 3>
-
-5-SENTENCE SUMMARY:
-<Sentence 1>. <Sentence 2>. <Sentence 3>. <Sentence 4>. <Sentence 5>.
-
-Content to summarize:
-{text}
-
-Important: Follow the format exactly. Do not add extra sections."""
-)
-
-YT_SUMMARY_PROMPT = PromptTemplate(
-    input_variables=["text"],
-    template="""You are an expert at summarizing YouTube video transcripts.
-
-Summarize the transcript below in exactly this format:
-
-ONE-LINE SUMMARY: A single sentence capturing what this video is about.
-
-KEY TOPICS COVERED:
-• <Topic 1>
-• <Topic 2>
-• <Topic 3>
-• <Topic 4>
-
-3 KEY TAKEAWAYS:
-• <Takeaway 1>
-• <Takeaway 2>
-• <Takeaway 3>
-
-5-SENTENCE SUMMARY:
-<Sentence 1>. <Sentence 2>. <Sentence 3>. <Sentence 4>. <Sentence 5>.
+yt_summary_prompt="""Summarize the YouTube transcript below:
+- ONE-LINE SUMMARY: A single sentence capturing the core topic.
+- KEY TOPICS COVERED: Bullet points of the main topics.
+- 3 KEY TAKEAWAYS: Bullet points of the key takeaways.
+- 5-SENTENCE SUMMARY: A cohesive 5-sentence paragraph.
 
 Transcript:
-{text}
+{text}"""
 
-Important: Follow the format exactly. Do not add extra sections."""
-)
+def _client():
+    return get_client()
 
-
-def _get_client() -> google_genai.Client:
-    return google_genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-
-def _extract_transcript_text(content: str) -> tuple[str, str]:
-    """
-    Separates the YouTube transcript from the rest of the content.
-    Returns (transcript_only, yt_url).
-    """
+def _get_yt_transcript(txt:str) -> tuple[str,str]:
     import re
-    match = re.search(r"\[YouTube Transcript: (https?://[^\]]+)\]\n(.*)", content, re.DOTALL)
+    match=re.search(r"\[YouTube Transcript: (https?://[^\]]+)\]\n(.*)",txt,re.DOTALL)
     if match:
-        return match.group(2).strip(), match.group(1).strip()
-    return content, ""
+        return match.group(2).strip(),match.group(1).strip()
+    return txt,""
 
-
-async def summarize_text(text: str) -> str:
-    if not text or len(text.strip()) < 50:
+async def summarize(txt:str) -> str:
+    if not txt or len(txt.strip())<50:
         return "[Not enough content to summarize.]"
 
-    logger.info(f"Summarizing text: {len(text)} chars")
+    logger.info(f"Summarizing text: {len(txt)} chars")
+    if len(txt)>chunk_size:
+        txt=await _summarize_chunks(txt)
 
-    if len(text) > CHUNK_SIZE:
-        text = await _chunk_and_summarize(text)
-
-    client   = _get_client()
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=SUMMARY_PROMPT.format(text=text[:6000]),
+    resp=_client().models.generate_content(
+        model=gemini_model,
+        contents=summary_prompt.format(text=txt[:6000]),
     )
-    result = response.text.strip()
-    logger.info(f"Summary generated: {len(result)} chars")
-    return result
+    return resp.text.strip()
 
-
-async def summarize_youtube_transcript(content: str) -> str:
-    """
-    YouTube-specific summarization.
-      1. Extracts the raw transcript from content
-      2. Decides short vs long path based on YT_LONG_THRESHOLD
-      3. Short → single Gemini call with YT_SUMMARY_PROMPT
-         Long  → map-reduce chunks → final YT_SUMMARY_PROMPT pass
-      4. Returns: transcript display block + summary
-    """
-    transcript, yt_url = _extract_transcript_text(content)
-
-    if not transcript or len(transcript.strip()) < 50:
+async def summarize_yt(content:str) -> str:
+    sub,url=_get_yt_transcript(content)
+    if not sub or len(sub.strip())<50:
         return "[No transcript content found to summarize.]"
 
-    logger.info(f"YouTube summarization: {len(transcript)} chars, url={yt_url}")
-
-    # ── Map-reduce for long transcripts ──────────────────────────────────
-    if len(transcript) > YT_LONG_THRESHOLD:
-        logger.info("Long transcript detected — using map-reduce")
-        summarized_content = await _map_reduce(transcript)
+    logger.info(f"YouTube summarization: {len(sub)} chars, url={url}")
+    if len(sub)>yt_threshold:
+        sum_content=await _reduce(sub)
     else:
-        logger.info("Short transcript — direct summarization")
-        summarized_content = transcript
+        sum_content=sub
 
-    # ── Final summary pass with YouTube-specific prompt ───────────────────
-    client   = _get_client()
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=YT_SUMMARY_PROMPT.format(text=summarized_content[:6000]),
+    resp=_client().models.generate_content(
+        model=gemini_model,
+        contents=yt_summary_prompt.format(text=sum_content[:6000]),
     )
-    summary = response.text.strip()
+    summary=resp.text.strip()
+    preview=_preview_yt(sub)
 
-    # ── Build final output: transcript preview + summary ──────────────────
-    transcript_preview = _format_transcript_preview(transcript)
+    return f"{summary}\n\n---\n\n{preview}"
 
-    return f"{summary}\n\n---\n\n{transcript_preview}"
-
-
-async def _map_reduce(transcript: str) -> str:
-    """
-    Split transcript into chunks → summarize each → combine.
-    Reduces a long transcript into a dense summary for the final pass.
-    """
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-    )
-    chunks = splitter.split_text(transcript)
+async def _reduce(sub:str) -> str:
+    split=RecursiveCharacterTextSplitter(chunk_size=chunk_size,chunk_overlap=overlap)
+    chunks=split.split_text(sub)
     logger.info(f"Map-reduce: {len(chunks)} chunks")
 
-    client          = _get_client()
-    chunk_summaries = []
-
-    for i, chunk in enumerate(chunks, 1):
+    client=_client()
+    briefs=[]
+    for i,chunk in enumerate(chunks,1):
         logger.info(f"Reducing chunk {i}/{len(chunks)}")
-        resp = client.models.generate_content(
-            model=GEMINI_MODEL,
+        resp=client.models.generate_content(
+            model=gemini_model,
             contents=f"Summarize this section of a video transcript in 3-4 sentences:\n\n{chunk}",
         )
-        chunk_summaries.append(resp.text.strip())
+        briefs.append(resp.text.strip())
 
-    combined = "\n\n".join(chunk_summaries)
-    logger.info(f"Map-reduce complete: {len(combined)} chars")
-    return combined
+    return "\n\n".join(briefs)
 
+def _preview_yt(sub:str) -> str:
+    words=len(sub.split())
+    preview=sub[:800].strip()
+    truncated=len(sub)>800
 
-def _format_transcript_preview(transcript: str) -> str:
-    """
-    Formats the raw transcript into a clean collapsible-ready block.
-    Shows first 800 chars as preview with total length info.
-    """
-    total_words = len(transcript.split())
-    preview     = transcript[:800].strip()
-    truncated   = len(transcript) > 800
-
-    lines = [
+    out=[
         "📝 **TRANSCRIPT**",
-        f"*({total_words:,} words total)*",
+        f"*({words:,} words total)*",
         "",
         preview,
     ]
     if truncated:
-        lines.append(f"\n*... [{len(transcript) - 800:,} more characters — expand Extracted Text panel to view full transcript]*")
+        out.append(f"\n*... [{len(sub)-800:,} more characters — expand Extracted Text panel to view]*")
 
-    return "\n".join(lines)
+    return "\n".join(out)
 
+async def _summarize_chunks(txt:str) -> str:
+    split=RecursiveCharacterTextSplitter(chunk_size=chunk_size,chunk_overlap=overlap)
+    chunks=split.split_text(txt)
+    logger.info(f"Doc split: {len(chunks)} chunks")
 
-async def _chunk_and_summarize(text: str) -> str:
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-    )
-    chunks = splitter.split_text(text)
-    logger.info(f"Document split into {len(chunks)} chunks")
-
-    client          = _get_client()
-    chunk_summaries = []
-
-    for i, chunk in enumerate(chunks, 1):
+    client=_client()
+    briefs=[]
+    for i,chunk in enumerate(chunks,1):
         logger.info(f"Summarizing chunk {i}/{len(chunks)}")
-        resp = client.models.generate_content(
-            model=GEMINI_MODEL,
+        resp=client.models.generate_content(
+            model=gemini_model,
             contents=f"Summarize this section in 3-4 sentences:\n\n{chunk}",
         )
-        chunk_summaries.append(resp.text.strip())
+        briefs.append(resp.text.strip())
 
-    return "\n\n".join(chunk_summaries)
+    return "\n\n".join(briefs)

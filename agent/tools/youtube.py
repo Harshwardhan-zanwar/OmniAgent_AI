@@ -1,126 +1,74 @@
-"""
-YouTube transcript fetcher.
-  - Extracts video ID from any YouTube URL format
-  - Uses youtube-transcript-api v1.1+ (instance-based API)
-  - No API key needed
-  - Falls back to informative message if unavailable
-"""
-
+"""YouTube transcript fetcher."""
 import re
 import logging
 
-logger = logging.getLogger("omni-agent-ai.tools.youtube")
+logger=logging.getLogger("omni-agent-ai.tools.youtube")
 
-def _extract_video_id(url: str) -> str | None:
-    """
-    Extract YouTube video ID from any URL format.
-    """
+def _get_vid(url:str) -> str | None:
     patterns=[
-        r"(?:v=)([\w\-]{11})",        # watch?v=
-        r"youtu\.be\/([\w\-]{11})",   # youtu.be/
-        r"shorts\/([\w\-]{11})",      # shorts/
-        r"embed\/([\w\-]{11})",       # embed/
+        r"(?:v=)([\w\-]{11})",
+        r"youtu\.be\/([\w\-]{11})",
+        r"shorts\/([\w\-]{11})",
+        r"embed\/([\w\-]{11})",
     ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
+    for p in patterns:
+        match=re.search(p,url)
         if match:
             return match.group(1)
     return None
 
-async def fetch_youtube_transcript(url: str) -> str:
-    """
-    Fetch the transcript for a YouTube video URL.
-    """
+async def get_yt_transcript(url:str) -> str:
     logger.info(f"Fetching YouTube transcript: {url}")
-
-    video_id = _extract_video_id(url)
+    video_id=_get_vid(url)
     if not video_id:
         return f"[Could not extract video ID from URL: {url}]"
 
     try:
-        from youtube_transcript_api import (
-            YouTubeTranscriptApi,
-            NoTranscriptFound,
-            TranscriptsDisabled,
-            VideoUnavailable,
-        )
+        from youtube_transcript_api import YouTubeTranscriptApi,NoTranscriptFound
 
-        # 1. Restore the instance-based API initialization required by your environment
-        api = YouTubeTranscriptApi()
-        # Helper to safely pass cookies (bypasses bot protection) without breaking custom wrappers
-        def safe_fetch(vid, langs):
-            try:
-                return api.fetch(vid, languages=langs)
-            except TypeError: 
-                # Fallback if your platform's wrapper rejects the cookies argument
-                return api.fetch(vid, languages=langs)
-
-        def safe_list(vid):
-            try:
-                return api.list(vid)
-            except TypeError:
-                return api.list(vid)
-
-        # 2. English first
+        api=YouTubeTranscriptApi()
         try:
-            transcript = safe_fetch(video_id, ["en"])
+            sub=api.fetch(video_id,languages=["en"])
         except NoTranscriptFound:
-            logger.info(f"No English transcript — trying any language for {video_id}")
-            transcript_list = safe_list(video_id)
-            available = list(transcript_list)
-            
-            if not available:
-                return await _fallback_message(url, video_id, "NoTranscriptFound")
-            
-            transcript = safe_fetch(video_id, [t.language_code for t in available])
+            logger.info(f"No English transcript for {video_id} — trying other languages")
+            avail=list(api.list(video_id))
+            if not avail:
+                return await _fallback(url,video_id,"NoTranscriptFound")
+            sub=api.fetch(video_id,languages=[t.language_code for t in avail])
 
-        # 3. Format with timestamps every 60 seconds (Restored object/dict support)
         parts=[]
-        current_min=-1
-
-        for entry in transcript:
-            # Reverting back to hasattr check to support custom wrapper objects
-            start=entry.start if hasattr(entry, "start") else entry["start"]
-            text=entry.text if hasattr(entry, "text")  else entry["text"]
-
+        last_min=-1
+        for entry in sub:
+            start=entry.start if hasattr(entry,"start") else entry["start"]
+            text=entry.text if hasattr(entry,"text") else entry["text"]
             minute=int(start//60)
-            if minute!=current_min:
+            if minute!=last_min:
                 parts.append(f"\n[{minute:02d}:{int(start%60):02d}]")
-                current_min=minute
+                last_min=minute
             parts.append(text)
 
-        full_transcript=" ".join(parts).strip()
-        logger.info(f"Transcript fetched: {len(full_transcript)} chars, video_id={video_id}")
-        return full_transcript
+        text_out=" ".join(parts).strip()
+        logger.info(f"Transcript fetched: {len(text_out)} chars, video_id={video_id}")
+        return text_out
 
-    except Exception as exc:
-        logger.warning(f"youtube-transcript-api failed for {video_id}: {exc}")
-        return await _fallback_message(url, video_id, str(exc))
+    except Exception as e:
+        logger.warning(f"YouTube transcript failed for {video_id}: {e}")
+        return await _fallback(url,video_id,str(e))
 
-async def _fallback_message(url: str, video_id: str, error: str) -> str:
-    """
-    Informative fallback when transcript is unavailable.
-    """
-    logger.info(f"Returning fallback for video {video_id}: {error}")
-
+async def _fallback(url:str,video_id:str,error:str) -> str:
     reasons={
-        "TranscriptsDisabled":"Transcripts are disabled for this video by the uploader.",
-        "VideoUnavailable":"This video is unavailable or private.",
-        "NoTranscriptFound":"No transcript found for this video in any language.",
-        "no element found":"YouTube returned an empty response — video may have no captions.",
-        "429":"YouTube rate-limited the request — please try again in a moment.",
+        "transcriptsdisabled":"Transcripts are disabled for this video.",
+        "videounavailable":"This video is unavailable or private.",
+        "notranscriptfound":"No transcript found for this video in any language.",
+        "no element found":"YouTube returned an empty response.",
+        "429":"YouTube rate-limited the request.",
     }
-
-    friendly_reason=next(
-        (msg for key, msg in reasons.items() if key.lower() in error.lower()),
-        f"Could not fetch transcript({error})"
-    )
+    reason=next((msg for k,msg in reasons.items() if k in error.lower()),f"Could not fetch transcript ({error})")
 
     return (
         f"[YouTube Transcript Unavailable]\n"
-        f"Video ID : {video_id}\n"
-        f"URL:{url}\n"
-        f"Reason:{friendly_reason}\n\n"
-        f"Suggestion: Try a video that has auto-generated captions enabled,\n"
-        f"e.g. https://youtu.be/VMj-3S1tku0"
+        f"Video ID: {video_id}\n"
+        f"URL: {url}\n"
+        f"Reason: {reason}\n\n"
+        f"Suggestion: Try a video that has auto-generated captions enabled."
     )

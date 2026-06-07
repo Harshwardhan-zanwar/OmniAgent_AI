@@ -1,144 +1,110 @@
-"""
-Conversation state management.
-  - Primary  : LangChain ConversationBufferWindowMemory ->in-memory
-  - Upgrade  : Redis-backed persistence (if UPSTASH_REDIS_URL is set)
-  - Keeps last 5 exchanges per session
-  - Auto-expires sessions after 24 hours (Redis) or server restart (memory)
-"""
-
+"""Conversation state management."""
 import os
 import json
 import logging
 from collections import defaultdict
 
-logger = logging.getLogger("omni-agent-ai.utils.state")
+logger=logging.getLogger("omni-agent-ai.utils.state")
+window=5
 
-MEMORY_WINDOW = 5
+redis_url=os.getenv("UPSTASH_REDIS_URL","")
+use_redis=bool(redis_url)
 
-REDIS_URL = os.getenv("UPSTASH_REDIS_URL", "")
-_USE_REDIS = bool(REDIS_URL)
-
-if _USE_REDIS:
+if use_redis:
     try:
         import redis as redis_lib
-        _redis_client=redis_lib.from_url(REDIS_URL, decode_responses=True)
-        _redis_client.ping()
-        logger.info("State backend: Redis (Upstash)")
-    except Exception as exc:
-        logger.warning(f"Redis connection failed:{exc} falling back to in-memory")
-        _USE_REDIS=False
-
-if not _USE_REDIS:
-    logger.info("State backend: In-memory (LangChain ConversationBufferWindowMemory)")
+        redis_client=redis_lib.from_url(redis_url,decode_responses=True)
+        redis_client.ping()
+        logger.info("State backend: Redis")
+    except Exception as e:
+        logger.warning(f"Redis failed: {e} — using memory")
+        use_redis=False
 
 try:
     from langchain.memory import ConversationBufferWindowMemory
-    _memory_store:dict[str,ConversationBufferWindowMemory]={}
+    mem_store={}
 
-    def _get_lc_memory(session_id: str) -> ConversationBufferWindowMemory:
-        if session_id not in _memory_store:
-            _memory_store[session_id]=ConversationBufferWindowMemory(
-                k=MEMORY_WINDOW,
+    def _get_lc_memory(sid:str) -> ConversationBufferWindowMemory:
+        if sid not in mem_store:
+            mem_store[sid]=ConversationBufferWindowMemory(
+                k=window,
                 return_messages=True,
-                memory_key="history",)
-        return _memory_store[session_id]
-    _LANGCHAIN_AVAILABLE=True
-
+                memory_key="history",
+            )
+        return mem_store[sid]
+    langchain_ok=True
 except ImportError:
-    _LANGCHAIN_AVAILABLE=False
-    _plain_store:dict[str,list]=defaultdict(list)
+    langchain_ok=False
+    plain_store=defaultdict(list)
 
-def add_turn(session_id: str, query: str, result: str) -> None:
-    """Save one user/assistant exchange to the session history."""
-    if _USE_REDIS:
+def add_turn(session_id:str,query:str,result:str) -> None:
+    if use_redis:
         _redis_add_turn(session_id,query,result)
-    elif _LANGCHAIN_AVAILABLE:
+    elif langchain_ok:
         _lc_add_turn(session_id,query,result)
     else:
         _plain_add_turn(session_id,query,result)
 
-def get_history(session_id: str) -> list[dict]:
-    """
-    Return conversation history as a list of dicts:
-    [{"role":"user"|"assistant", "content":"..."}]
-    """
-    if _USE_REDIS:
-        return _redis_get_history(session_id)
-    elif _LANGCHAIN_AVAILABLE:
-        return _lc_get_history(session_id)
-    else:
-        return _plain_get_history(session_id)
+def get_history(sid:str) -> list[dict]:
+    if use_redis:
+        return _redis_get_history(sid)
+    elif langchain_ok:
+        return _lc_get_history(sid)
+    return _plain_get_history(sid)
 
-def get_history_as_gemini_format(session_id:str) -> list[dict]:
-    """
-    Return history formatted for Gemini's start_chat(history=...) API.
-    [{"role":"user"|"model", "parts":["..."]}]
-    """
-    history=get_history(session_id)
-    return[
+def get_history_as_gemini_format(sid:str) -> list[dict]:
+    history=get_history(sid)
+    return [
         {
-            "role":"model"if turn["role"]=="assistant" else"user",
-            "parts":[turn["content"]],
+            "role":"model" if turn["role"]=="assistant" else "user",
+            "parts":[{"text": turn["content"]}],
         }
         for turn in history
     ]
 
-def clear_session(session_id:str) -> None:
-    """Delete all history for a session."""
-    if _USE_REDIS:
-        _redis_client.delete(f"session:{session_id}")
-    elif _LANGCHAIN_AVAILABLE and session_id in _memory_store:
-        del _memory_store[session_id]
-    elif not _LANGCHAIN_AVAILABLE:
-        _plain_store.pop(session_id,None)
-    logger.info(f"Session cleared: {session_id}")
+def clear_session(sid:str) -> None:
+    if use_redis:
+        redis_client.delete(f"session:{sid}")
+    elif langchain_ok and sid in mem_store:
+        del mem_store[sid]
+    elif not langchain_ok:
+        plain_store.pop(sid,None)
+    logger.info(f"Cleared session: {sid}")
 
+def _lc_add_turn(sid:str,q:str,res:str) -> None:
+    mem=_get_lc_memory(sid)
+    mem.save_context({"input":q},{"output":res[:600]})
 
-#lc backend
-def _lc_add_turn(session_id:str,query:str,result:str) -> None:
-    mem=_get_lc_memory(session_id)
-    mem.save_context(
-        {"input":query},
-        {"output":result[:600]},
-    )
-    logger.debug(f"[LC] Saved turn for session {session_id}")
-
-def _lc_get_history(session_id:str) -> list[dict]:
-    mem=_get_lc_memory(session_id)
-    messages=mem.load_memory_variables({}).get("history",[])
+def _lc_get_history(sid:str) -> list[dict]:
+    mem=_get_lc_memory(sid)
+    msgs=mem.load_memory_variables({}).get("history",[])
     history=[]
-    for msg in messages:
+    for msg in msgs:
         role="user" if msg.__class__.__name__=="HumanMessage" else "assistant"
         history.append({"role":role,"content":msg.content})
     return history
 
-
-# redis backend
-def _redis_add_turn(session_id:str,query:str,result:str) -> None:
-    key=f"session:{session_id}"
-    history=_redis_get_history(session_id)
+def _redis_add_turn(sid:str,q:str,res:str) -> None:
+    key=f"session:{sid}"
+    history=_redis_get_history(sid)
     history.extend([
-        {"role":"user",      "content": query},
-        {"role":"assistant", "content": result[:600]},
+        {"role":"user","content":q},
+        {"role":"assistant","content":res[:600]},
     ])
-    history = history[-(MEMORY_WINDOW * 2):]
-    _redis_client.setex(key, 86400, json.dumps(history))  # 24hr TTL
-    logger.debug(f"[Redis] Saved turn for session {session_id}")
+    history=history[-(window*2):]
+    redis_client.setex(key,86400,json.dumps(history))
 
-def _redis_get_history(session_id: str) -> list[dict]:
-    key =f"session:{session_id}"
-    data=_redis_client.get(key)
+def _redis_get_history(sid:str) -> list[dict]:
+    key=f"session:{sid}"
+    data=redis_client.get(key)
     return json.loads(data) if data else []
 
-
-# plain python
-def _plain_add_turn(session_id:str,query:str,result:str) -> None:
-    _plain_store[session_id].extend([
-        {"role":"user","content":query},
-        {"role":"assistant","content":result[:600]},
+def _plain_add_turn(sid:str,q:str,res:str) -> None:
+    plain_store[sid].extend([
+        {"role":"user","content":q},
+        {"role":"assistant","content":res[:600]},
     ])
-    _plain_store[session_id]=_plain_store[session_id][-(MEMORY_WINDOW*2):]
+    plain_store[sid]=plain_store[sid][-(window*2):]
 
-
-def _plain_get_history(session_id:str) -> list[dict]:
-    return list(_plain_store.get(session_id,[]))
+def _plain_get_history(sid:str) -> list[dict]:
+    return list(plain_store.get(sid,[]))

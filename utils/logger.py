@@ -1,64 +1,41 @@
-"""
-Structured logging + plan trace formatting.
-  - Rich colored console output during development
-  - JSON-structured logs for production (Render)
-  - Plan trace formatter for the UI
-  - Request/response logging middleware helper
-"""
-
+"""Structured logging and plan formatting."""
 import os
-import json
 import logging
 import time
-from datetime import datetime
-from typing import Any
 
-#detect environment
-IS_PRODUCTION=os.getenv("RENDER","") == "true" or os.getenv("ENV","")=="production"
+is_prod=os.getenv("RENDER","")=="true" or os.getenv("ENV","")=="production"
 
 def setup_logging(level:str="INFO") -> None:
-    """
-    Configure logging for the whole app.
-    - Development : Rich colored output
-    - Production  : Plain JSON lines (easier to read in Render logs)
-    """
-    log_level=getattr(logging,level.upper(),logging.INFO)
-
-    if IS_PRODUCTION:
-        #simple format for Render log viewer
+    lvl=getattr(logging,level.upper(),logging.INFO)
+    if is_prod:
         logging.basicConfig(
-            level=log_level,
+            level=lvl,
             format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
             datefmt="%Y-%m-%dT%H:%M:%S",
         )
-        logger = logging.getLogger("omni-agent-ai")
-        logger.info("Logging initialised (production mode)")
+        logging.getLogger("omni-agent-ai").info("Logging initialised (prod)")
     else:
-        #rich colored output
         try:
             from rich.logging import RichHandler
             logging.basicConfig(
-                level=log_level,
+                level=lvl,
                 format="%(message)s",
                 datefmt="[%H:%M:%S]",
-                handlers=[RichHandler(rich_tracebacks=True, show_path=False)],
+                handlers=[RichHandler(rich_tracebacks=True,show_path=False)],
             )
-            logger = logging.getLogger("omni-agent-ai")
-            logger.info("Logging initialised (dev mode with Rich)")
+            logging.getLogger("omni-agent-ai").info("Logging initialised (Rich)")
         except ImportError:
-            logging.basicConfig(level=log_level)
-            logger = logging.getLogger("omni-agent-ai")
-            logger.info("Logging initialised (dev mode, Rich not installed)")
+            logging.basicConfig(level=lvl)
+            logging.getLogger("omni-agent-ai").info("Logging initialised (Standard)")
 
-#PLAN TRACE FORMATTER
-STATUS_ICONS = {
-    "success": "✅",
-    "failed":  "❌",
-    "skipped": "⏭️",
-    "pending": "⏳",
+status_icons={
+    "success":"✅",
+    "failed":"❌",
+    "skipped":"⏭️",
+    "pending":"⏳",
 }
 
-TOOL_ICONS = {
+tool_icons={
     "pdf_extractor":"📄",
     "ocr_vision":"🔍",
     "audio_transcriber":"🎙️",
@@ -75,109 +52,53 @@ TOOL_ICONS = {
     "text_reader":"📃",
 }
 
-def format_plan_trace(plan_trace: list[dict]) -> str:
-    """
-    Convert a plan_trace list into a human-readable string for the UI.
-    Example output:
-        ✅ Step 1 [📄 pdf_extractor] — Extracted text from report.pdf
-           Preview: The Q3 results showed a 12% increase in…
-
-        ✅ Step 2 [🧠 intent_classifier] — Detected intent: 'summarize'(94%)
-           Preview: User wants a structured summary of the document.
-    """
-    if not plan_trace:
+def format_trace(trace:list[dict]) -> str:
+    if not trace:
         return "No steps recorded."
 
-    lines = []
-    for step in plan_trace:
-        step_num=step.get("step", "?")
-        tool=step.get("tool", "unknown")
-        description=step.get("description", "")
-        status=step.get("status", "success")
-        preview=step.get("output_preview", "")
+    lines=[]
+    for step in trace:
+        num=step.get("step","?")
+        tool=step.get("tool","unknown")
+        desc=step.get("description","")
+        status=step.get("status","success")
+        preview=step.get("output_preview","")
 
-        status_icon=STATUS_ICONS.get(status, "•")
-        tool_icon=TOOL_ICONS.get(tool, "🔧")
+        s_icon=status_icons.get(status,"•")
+        t_icon=tool_icons.get(tool,"🔧")
 
-        lines.append(
-            f"{status_icon} Step {step_num} [{tool_icon} {tool}] — {description}"
-        )
+        lines.append(f"{s_icon} Step {num} [{t_icon} {tool}] — {desc}")
         if preview:
             lines.append(f"   ↳ {preview}")
         lines.append("")
 
     return "\n".join(lines).strip()
 
-def format_plan_trace_json(plan_trace: list[dict]) -> list[dict]:
-    """
-    Enrich plan trace dicts with icons — returned as JSON for the frontend
-    to render as an animated step list.
-    """
-    enriched=[]
-    for step in plan_trace:
-        tool=step.get("tool", "unknown")
-        status=step.get("status", "success")
-        enriched.append({
+def format_trace_json(trace:list[dict]) -> list[dict]:
+    res=[]
+    for step in trace:
+        tool=step.get("tool","unknown")
+        status=step.get("status","success")
+        res.append({
             **step,
-            "tool_icon":TOOL_ICONS.get(tool,"🔧"),
-            "status_icon":STATUS_ICONS.get(status,"•"),
+            "tool_icon":tool_icons.get(tool,"🔧"),
+            "status_icon":status_icons.get(status,"•"),
         })
-    return enriched
+    return res
 
-# REQUEST LOGGER —in main.py middleware
 class RequestLogger:
-    """
-    Lightweight request/response logger.
-    Use as a dependency in FastAPI endpoints.
-    """
     def __init__(self):
         self.logger=logging.getLogger("omni-agent-ai.requests")
 
-    def log_request(
-        self,
-        session_id:str,
-        method:str,
-        path:str,
-        query:str,
-        file_count:int,
-    ) -> float:
-        """Log incoming request. Returns start timestamp."""
+    def log_request(self,sid:str,method:str,path:str,query:str,f_count:int) -> float:
         start=time.time()
-        self.logger.info(
-            f"[{session_id}]→{method}{path}"
-            f"query='{query[:50]}'files={file_count}"
-        )
+        self.logger.info(f"[{sid}] → {method} {path} query='{query[:50]}' files={f_count}")
         return start
 
-    def log_response(
-        self,
-        session_id:str,
-        start_time:float,
-        status:str,
-        steps:int,
-        tokens:int | None = None,
-    ) -> None:
-        """Log completed response with timing."""
-        elapsed=round(time.time()-start_time, 2)
-        self.logger.info(
-            f"[{session_id}] ← {status} "
-            f"steps={steps} tokens={tokens or '?'} "
-            f"time={elapsed}s"
-        )
+    def log_response(self,sid:str,start:float,status:str,steps:int,tok:int|None=None) -> None:
+        dt=round(time.time()-start,2)
+        self.logger.info(f"[{sid}] ← {status} steps={steps} tokens={tok or '?'} time={dt}s")
 
-#utils
-def log_agent_summary(
-    session_id:str,
-    intent:str,
-    tools_used:list[str],
-    elapsed:float,
-    token_count:int,
-) -> None:
-    """Log a one-line summary after each agent run — useful for monitoring."""
+def log_summary(sid:str,intent:str,tools:list[str],dt:float,tok_count:int) -> None:
     logger=logging.getLogger("omni-agent-ai.summary")
-    logger.info(
-        f"[{session_id}]intent={intent}"
-        f"tools=[{', '.join(tools_used)}]"
-        f"tokens={token_count}"
-        f"time={elapsed:.2f}s"
-    )
+    logger.info(f"[{sid}] intent={intent} tools=[{', '.join(tools)}] tokens={tok_count} time={dt:.2f}s")

@@ -1,118 +1,69 @@
-"""
-Code explanation, bug detection, and complexity analysis.
-  - Auto-detects programming language
-  - Explains what the code does
-  - Detects bugs / issues
-  - Reports time + space complexity
-"""
-
+"""Code explanation and complexity analysis."""
 import logging
 import re
+from agent.config import GEMINI_MODEL, get_client
 
-from google import genai as google_genai
-from agent.config import GEMINI_MODEL
-from langchain_core.prompts import PromptTemplate
+logger=logging.getLogger("omni-agent-ai.tools.code_explain")
 
-logger = logging.getLogger("omni-agent-ai.tools.code_explain")
-
-LANGUAGE_PATTERNS = {
-    "Python":     [r"def ", r"import ", r"print\(", r":\n", r"elif "],
-    "JavaScript": [r"const ", r"let ", r"var ", r"=>", r"console\.log"],
-    "TypeScript": [r"interface ", r": string", r": number", r"=> \{"],
-    "Java":       [r"public class", r"System\.out", r"void main", r"@Override"],
-    "C++":        [r"#include", r"std::", r"cout <<", r"int main\(\)"],
-    "SQL":        [r"SELECT ", r"FROM ", r"WHERE ", r"JOIN ", r"INSERT INTO"],
-    "Go":         [r"func ", r"package main", r":= ", r"fmt\."],
-    "Rust":       [r"fn main", r"let mut", r"println!", r"impl "],
+lang_patterns={
+    "Python":[r"def ",r"import ",r"print\(",r":\n",r"elif "],
+    "JavaScript":[r"const ",r"let ",r"var ",r"=>",r"console\.log"],
+    "TypeScript":[r"interface ",r": string",r": number",r"=> \{"],
+    "Java":[r"public class",r"System\.out",r"void main",r"@Override"],
+    "C++":[r"#include",r"std::",r"cout <<",r"int main\(\)"],
+    "SQL":[r"SELECT ",r"FROM ",r"WHERE ",r"JOIN ",r"INSERT INTO"],
+    "Go":[r"func ",r"package main",r":= ",r"fmt\."],
+    "Rust":[r"fn main",r"let mut",r"println!",r"impl "],
 }
 
-CODE_EXPLAIN_PROMPT = PromptTemplate(
-    input_variables=["language", "code"],
-    template="""You are a senior software engineer and code reviewer.
+prompt_template="""Explain this {language} code.
+Please structure your review as follows:
+- What the code does: Step-by-step description of the logic.
+- Bugs or issues: Any issues, edge cases, or potential fixes (or write "None detected" if clean).
+- Complexity: Time and space complexity details.
+- Suggested improvements (if any).
 
-Analyze the following {language} code and provide:
-
-**WHAT IT DOES:**
-<Clear explanation of the code's purpose and logic, step by step>
-
-**DETECTED BUGS / ISSUES:**
-<List any bugs, edge cases, or bad practices. Write "None detected" if clean>
-
-**TIME COMPLEXITY:** <O(?) with explanation>
-**SPACE COMPLEXITY:** <O(?) with explanation>
-
-**IMPROVED VERSION (optional):**
-<Only include if there are meaningful improvements to suggest>
-
-Code:
+Here is the code:
 ```{language}
 {code}
-```
+```"""
 
-Be specific, technical, and helpful."""
-)
-
-
-async def explain_code(text: str) -> str:
-    """
-    Explain code extracted from an image or text input.
-    Auto-detects language, explains, finds bugs, reports complexity.
-    """
-    if not text or len(text.strip()) < 10:
+async def explain_code(txt:str) -> str:
+    if not txt or len(txt.strip())<10:
         return "[No code content found to explain.]"
 
-    logger.info(f"Explaining code: {len(text)} chars")
+    logger.info(f"Explaining code: {len(txt)} chars")
+    code=_get_code(txt)
+    lang=_get_lang(code)
+    label=lang if lang!="Unknown" else "the code"
 
-    #Extract code block if mixed
-    code = _extract_code_block(text)
-    detected = _detect_language(code)
-    if detected == "Unknown":
-        language = "the programming language used in this code"
-    else:
-        language = detected
+    prompt=prompt_template.format(language=label,code=code[:4000])
+    client=get_client()
+    resp=client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt
+    )
+    res=resp.text.strip()
+    return f"🔍 **Detected Language: {lang}**\n\n{res}"
 
-    logger.info(f"Detected language:{language}")
-    import os
-    prompt=CODE_EXPLAIN_PROMPT.format(language=language,code=code[:4000])
-    client = google_genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-    response = client.models.generate_content(
-    model=GEMINI_MODEL,
-    contents=prompt
-)
-    result=response.text.strip()
-    logger.info(f"code explanation generated:{len(result)}chars")
-
-    return f"🔍 **Detected Language:{language}**\n\n{result}"
-
-
-def _detect_language(code: str) -> str:
-    """
-    Detect programming language using regex pattern matching.
-    """
-    scores = {}
-    for lang, patterns in LANGUAGE_PATTERNS.items():
-        score=sum(1 for p in patterns if re.search(p, code))
+def _get_lang(code:str) -> str:
+    scores={}
+    for lang,patterns in lang_patterns.items():
+        score=sum(1 for p in patterns if re.search(p,code))
         if score>0:
             scores[lang]=score
-
     if not scores:
         return "Unknown"
-
     return max(scores,key=scores.get)
 
+def _get_code(txt:str) -> str:
+    match=re.search(r"```[\w]*\n(.*?)```",txt,re.DOTALL)
+    if match:
+        return match.group(1).strip()
 
-def _extract_code_block(text: str) -> str:
-    """
-    If text contains markdown code fences, extract just the code.
-    Otherwise return the full text (it's probably raw code from OCR).
-    """
-    fence_match= re.search(r"```[\w]*\n(.*?)```",text,re.DOTALL)
-    if fence_match:
-        return fence_match.group(1).strip()
-
-    lines=text.split("\n")
+    lines=txt.split("\n")
     code_lines=[l for l in lines if l.startswith("    ") or l.startswith("\t")]
     if len(code_lines)>len(lines)*0.4:
         return "\n".join(l.lstrip() for l in code_lines)
 
-    return text.strip()
+    return txt.strip()

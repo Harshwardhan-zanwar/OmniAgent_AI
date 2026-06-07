@@ -1,102 +1,74 @@
-"""
-  - Label       : Positive / Negative / Neutral / Mixed
-  - Confidence  : 0 - 1
-  - Justification: one-line explanation
-  - Emotion tags: top 3 detected emotions
-"""
-
+"""Sentiment analysis tool."""
 import json
 import logging
 import re
-import os
+from agent.config import get_client
 
-from google import genai as google_genai
-from agent.config import GEMINI_MODEL
-from langchain_core.prompts import PromptTemplate
+logger=logging.getLogger("omni-agent-ai.tools.sentiment")
 
-logger = logging.getLogger("omni-agent-ai.tools.sentiment")
+prompt_template="""Analyze the sentiment of the text below.
+Respond ONLY with a JSON block containing these keys:
+- label: "Positive", "Negative", "Neutral", or "Mixed"
+- confidence: float score from 0.0 to 1.0
+- justification: single sentence explanation
+- emotions: list of top 3 detected emotions
+- tone: "formal", "informal", "aggressive", "empathetic", or "neutral"
 
-SENTIMENT_PROMPT = PromptTemplate(
-    input_variables=["text"],
-    template="""You are a sentiment analysis expert.
-Analyze the sentiment of the text below and respond ONLY with valid JSON, no markdown fences:
-{{
-  "label":         "Positive" | "Negative" | "Neutral" | "Mixed",
-  "confidence":     float between 0.0 and 1.0,
-  "justification": "one sentence explaining why",
-  "emotions":      ["emotion1", "emotion2", "emotion3"],
-  "tone":          "formal | informal | aggressive | empathetic | neutral"
-}}
-Text to analyze:{text}"""
-)
+Do not include markdown code fences in your response.
 
-async def analyze_sentiment(text: str) -> str:
-    """
-    Perform sentiment analysis on the given text.
-    Returns a formatted, human-readable sentiment report.
-    """
-    
-    logger.info(f"Analyzing sentiment: {len(text)} chars")
+Text:
+{text}"""
 
-    if not text or len(text.strip()) < 10:
+async def get_sentiment(txt:str) -> str:
+    if not txt or len(txt.strip())<10:
         return "[Not enough content for sentiment analysis.]"
-    
-    
 
-    sample  = text[:4000]
-    prompt  = SENTIMENT_PROMPT.format(text=sample)
-    client = google_genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    logger.info(f"Analyzing sentiment: {len(txt)} chars")
+    sample=txt[:4000]
+    prompt=prompt_template.format(text=sample)
+    client=get_client()
 
     try:
-        response = client.models.generate_content(
+        resp=client.models.generate_content(
             model="gemini-2.5-flash-lite",
             contents=prompt,
         )
-        raw = response.text.strip()
+        raw=resp.text.strip()
+        raw=re.sub(r"^```json|^```|```$","",raw,flags=re.MULTILINE).strip()
+        data=json.loads(raw)
+        return _format_report(data)
+    except Exception as e:
+        logger.warning(f"Structured sentiment failed: {e} — using plain fallback")
+        return await _fallback_sentiment(txt)
 
-        raw = re.sub(r"^```json|^```|```$", "", raw, flags=re.MULTILINE).strip()
-        data = json.loads(raw)
+def _format_report(res:dict) -> str:
+    lbl=res.get("label","Unknown")
+    conf=float(res.get("confidence",0.0))
+    desc=res.get("justification","N/A")
+    emos=res.get("emotions",[])
+    tone=res.get("tone","N/A")
 
-        return _format_sentiment_report(data)
+    n=int(conf*10)
+    bar="█"*n+"░"*(10-n)
 
-    except (json.JSONDecodeError, Exception) as exc:
-        logger.warning(f"Structured sentiment failed: {exc} — using plain response")
-        return await _plain_sentiment_fallback(text)
-
-
-def _format_sentiment_report(data: dict) -> str:
-    """Format the JSON sentiment result into a clean readable report."""
-    label= data.get("label","Unknown")
-    confidence= float(data.get("confidence",0.0))
-    justification= data.get("justification","N/A")
-    emotions= data.get("emotions",[])
-    tone= data.get("tone","N/A")
-
-    # Confidence bar visualization
-    filled= int(confidence * 10)
-    bar= "█" * filled + "░" * (10 - filled)
-
-    # Sentiment emoji
-    emoji_map = {
+    emojis={
         "Positive":"🟢",
         "Negative":"🔴",
         "Neutral":"🟡",
         "Mixed":"🟠",
     }
-    emoji=emoji_map.get(label,"⚪")
+    emoji=emojis.get(lbl,"⚪")
 
-    return f"""{emoji}**Sentiment:{label}**
-**Confidence:**{bar}{confidence:.0%}
-**Justification:**{justification}
-**Detected Emotions:**{', '.join(emotions) if emotions else 'N/A'}
-**Tone:**{tone.capitalize()}```"""
+    return f"""{emoji} **Sentiment: {lbl}**
+**Confidence:** {bar} {conf:.0%}
+**Justification:** {desc}
+**Detected Emotions:** {', '.join(emos) if emos else 'N/A'}
+**Tone:** {tone.capitalize()}"""
 
-async def _plain_sentiment_fallback(text: str) -> str:
-    """Simple fallback when JSON parsing fails."""
-    client = google_genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-    response = client.models.generate_content(
+async def _fallback_sentiment(txt:str) -> str:
+    client=get_client()
+    resp=client.models.generate_content(
         model="gemini-2.5-flash-lite",
-        contents=f"Analyze the sentiment of this text. Give: label (Positive/Negative/Neutral/Mixed), "
-                 f"confidence percentage, and one-line justification.\nText:{text[:2000]}",
+        contents=f"Analyze the sentiment of this text. Return a label (Positive/Negative/Neutral/Mixed), confidence score, and short justification.\n\nText: {txt[:2000]}",
     )
-    return response.text.strip()
+    return resp.text.strip()
