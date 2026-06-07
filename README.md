@@ -145,7 +145,7 @@ omni-agent-ai/
 |---|---|
 | Frontend | Vanilla HTML + CSS + JS (no framework) |
 | Backend | FastAPI + Uvicorn |
-| AI Brain | Google Gemini 2.5 Flash |
+| AI Brain | Google Gemini 2.5 Flash Lite|
 | OCR | Google Cloud Vision + Gemini Vision |
 | Audio | Gemini Audio API + Google STT |
 | PDF | LangChain PyPDFLoader + pdfplumber |
